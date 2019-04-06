@@ -7,6 +7,10 @@ import torch.nn.init as init
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print('Using device:', device)
+print()
+
 def position_encoding(embedded_sentence):
     '''
     embedded_sentence.size() -> (#batch, #sentence, #token, #embedding)
@@ -20,7 +24,7 @@ def position_encoding(embedded_sentence):
     l = l.unsqueeze(0) # for #batch
     l = l.unsqueeze(1) # for #sen
     l = l.expand_as(embedded_sentence)
-    weighted = embedded_sentence * Variable(l.cuda())
+    weighted = embedded_sentence * Variable(l.to(device))
     return torch.sum(weighted, dim=2).squeeze(2) # sum with tokens
 
 class AttentionGRUCell(nn.Module):
@@ -28,13 +32,13 @@ class AttentionGRUCell(nn.Module):
         super(AttentionGRUCell, self).__init__()
         self.hidden_size = hidden_size
         self.Wr = nn.Linear(input_size, hidden_size)
-        init.xavier_normal(self.Wr.state_dict()['weight'])
+        init.xavier_normal_(self.Wr.state_dict()['weight'])
         self.Ur = nn.Linear(hidden_size, hidden_size)
-        init.xavier_normal(self.Ur.state_dict()['weight'])
+        init.xavier_normal_(self.Ur.state_dict()['weight'])
         self.W = nn.Linear(input_size, hidden_size)
-        init.xavier_normal(self.W.state_dict()['weight'])
+        init.xavier_normal_(self.W.state_dict()['weight'])
         self.U = nn.Linear(hidden_size, hidden_size)
-        init.xavier_normal(self.U.state_dict()['weight'])
+        init.xavier_normal_(self.U.state_dict()['weight'])
 
     def forward(self, fact, C, g):
         '''
@@ -45,8 +49,8 @@ class AttentionGRUCell(nn.Module):
         g.size() -> (#batch, )
         '''
 
-        r = F.sigmoid(self.Wr(fact) + self.Ur(C))
-        h_tilda = F.tanh(self.W(fact) + r * self.U(C))
+        r = torch.sigmoid(self.Wr(fact) + self.Ur(C))
+        h_tilda = torch.tanh(self.W(fact) + r * self.U(C))
         g = g.unsqueeze(1).expand_as(h_tilda)
         h = g * h_tilda + (1 - g) * C
         return h
@@ -66,7 +70,7 @@ class AttentionGRU(nn.Module):
         C.size() -> (#batch, #hidden)
         '''
         batch_num, sen_num, embedding_size = facts.size()
-        C = Variable(torch.zeros(self.hidden_size)).cuda()
+        C = Variable(torch.zeros(self.hidden_size)).to(device)
         for sid in range(sen_num):
             fact = facts[:, sid, :]
             g = G[:, sid]
@@ -82,9 +86,9 @@ class EpisodicMemory(nn.Module):
         self.z1 = nn.Linear(4 * hidden_size, hidden_size)
         self.z2 = nn.Linear(hidden_size, 1)
         self.next_mem = nn.Linear(3 * hidden_size, hidden_size)
-        init.xavier_normal(self.z1.state_dict()['weight'])
-        init.xavier_normal(self.z2.state_dict()['weight'])
-        init.xavier_normal(self.next_mem.state_dict()['weight'])
+        init.xavier_normal_(self.z1.state_dict()['weight'])
+        init.xavier_normal_(self.z2.state_dict()['weight'])
+        init.xavier_normal_(self.next_mem.state_dict()['weight'])
 
     def make_interaction(self, facts, questions, prevM):
         '''
@@ -107,10 +111,10 @@ class EpisodicMemory(nn.Module):
 
         z = z.view(-1, 4 * embedding_size)
 
-        G = F.tanh(self.z1(z))
+        G = torch.tanh(self.z1(z))
         G = self.z2(G)
         G = G.view(batch_num, -1)
-        G = F.softmax(G)
+        G = F.softmax(G, dim=1)
 
         return G
 
@@ -153,7 +157,7 @@ class InputModule(nn.Module):
         self.hidden_size = hidden_size
         self.gru = nn.GRU(hidden_size, hidden_size, bidirectional=True, batch_first=True)
         for name, param in self.gru.state_dict().items():
-            if 'weight' in name: init.xavier_normal(param)
+            if 'weight' in name: init.xavier_normal_(param)
         self.dropout = nn.Dropout(0.1)
 
     def forward(self, contexts, word_embedding):
@@ -172,7 +176,7 @@ class InputModule(nn.Module):
         contexts = position_encoding(contexts)
         contexts = self.dropout(contexts)
 
-        h0 = Variable(torch.zeros(2, batch_num, self.hidden_size).cuda())
+        h0 = Variable(torch.zeros(2, batch_num, self.hidden_size).to(device))
         facts, hdn = self.gru(contexts, h0)
         facts = facts[:, :, :hidden_size] + facts[:, :, hidden_size:]
         return facts
@@ -181,7 +185,7 @@ class AnswerModule(nn.Module):
     def __init__(self, vocab_size, hidden_size):
         super(AnswerModule, self).__init__()
         self.z = nn.Linear(2 * hidden_size, vocab_size)
-        init.xavier_normal(self.z.state_dict()['weight'])
+        init.xavier_normal_(self.z.state_dict()['weight'])
         self.dropout = nn.Dropout(0.1)
 
     def forward(self, M, questions):
@@ -195,9 +199,9 @@ class DMNPlus(nn.Module):
         super(DMNPlus, self).__init__()
         self.num_hop = num_hop
         self.qa = qa
-        self.word_embedding = nn.Embedding(vocab_size, hidden_size, padding_idx=0, sparse=True).cuda()
-        init.uniform(self.word_embedding.state_dict()['weight'], a=-(3**0.5), b=3**0.5)
-        self.criterion = nn.CrossEntropyLoss(size_average=False)
+        self.word_embedding = nn.Embedding(vocab_size, hidden_size, padding_idx=0, sparse=True).to(device)
+        init.uniform_(self.word_embedding.state_dict()['weight'], a=-(3**0.5), b=3**0.5)
+        self.criterion = nn.CrossEntropyLoss(reduction='sum')
 
         self.input_module = InputModule(vocab_size, hidden_size)
         self.question_module = QuestionModule(vocab_size, hidden_size)
@@ -241,7 +245,7 @@ class DMNPlus(nn.Module):
         reg_loss = 0
         for param in self.parameters():
             reg_loss += 0.001 * torch.sum(param * param)
-        preds = F.softmax(output)
+        preds = F.softmax(output, dim=1)
         _, pred_ids = torch.max(preds, dim=1)
         corrects = (pred_ids.data == answers.data)
         acc = torch.mean(corrects.float())
@@ -255,7 +259,7 @@ if __name__ == '__main__':
             hidden_size = 80
 
             model = DMNPlus(hidden_size, vocab_size, num_hop=3, qa=dset.QA)
-            model.cuda()
+            model.to(device)
             early_stopping_cnt = 0
             early_stopping_flag = False
             best_acc = 0
@@ -276,9 +280,9 @@ if __name__ == '__main__':
                         optim.zero_grad()
                         contexts, questions, answers = data
                         batch_size = contexts.size()[0]
-                        contexts = Variable(contexts.long().cuda())
-                        questions = Variable(questions.long().cuda())
-                        answers = Variable(answers.cuda())
+                        contexts = Variable(contexts.long().to(device))
+                        questions = Variable(questions.long().to(device))
+                        answers = Variable(answers.to(device))
 
                         loss, acc = model.get_loss(contexts, questions, answers)
                         loss.backward()
@@ -286,7 +290,7 @@ if __name__ == '__main__':
                         cnt += batch_size
 
                         if batch_idx % 20 == 0:
-                            print(f'[Task {task_id}, Epoch {epoch}] [Training] loss : {loss.data[0]: {10}.{8}}, acc : {total_acc / cnt: {5}.{4}}, batch_idx : {batch_idx}')
+                            print(f'[Task {task_id}, Epoch {epoch}] [Training] loss : {loss.data.item(): {10}.{8}}, acc : { total_acc / cnt  : {5}.{4}}, batch_idx : {batch_idx}')
                         optim.step()
 
                     dset.set_mode('valid')
@@ -300,9 +304,9 @@ if __name__ == '__main__':
                     for batch_idx, data in enumerate(valid_loader):
                         contexts, questions, answers = data
                         batch_size = contexts.size()[0]
-                        contexts = Variable(contexts.long().cuda())
-                        questions = Variable(questions.long().cuda())
-                        answers = Variable(answers.cuda())
+                        contexts = Variable(contexts.long().to(device))
+                        questions = Variable(questions.long().to(device))
+                        answers = Variable(answers.to(device))
 
                         _, acc = model.get_loss(contexts, questions, answers)
                         total_acc += acc * batch_size
@@ -337,9 +341,9 @@ if __name__ == '__main__':
             for batch_idx, data in enumerate(test_loader):
                 contexts, questions, answers = data
                 batch_size = contexts.size()[0]
-                contexts = Variable(contexts.long().cuda())
-                questions = Variable(questions.long().cuda())
-                answers = Variable(answers.cuda())
+                contexts = Variable(contexts.long().to(device))
+                questions = Variable(questions.long().to(device))
+                answers = Variable(answers.to(device))
 
                 model.load_state_dict(best_state)
                 _, acc = model.get_loss(contexts, questions, answers)
